@@ -19,6 +19,7 @@ from urllib.parse import quote as urlquote
 import requests
 from dotenv import load_dotenv
 from flask import Flask, abort, g, jsonify, request, send_file, send_from_directory, session
+from flask.sessions import SecureCookieSessionInterface
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from PIL import Image, ImageOps, UnidentifiedImageError
 from reportlab.lib.pagesizes import A4
@@ -26,6 +27,7 @@ from reportlab.pdfgen import canvas
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .db import create_database, default_database_url, local_now
@@ -269,6 +271,26 @@ def activate_due_maintenance(db, commit=True):
         if commit: db.commit()
 
 
+class SchemeAwareSessionInterface(SecureCookieSessionInterface):
+    """Cookie flags that follow the scheme the browser actually uses.
+
+    Behind a TLS-terminating proxy (hosted previews, PaaS) Flask only sees plain
+    HTTP, so ProxyFix is applied and `request.is_secure` reports the public scheme.
+    Over HTTPS in non-production the cookie is also marked SameSite=None, because a
+    preview that is embedded in a cross-site iframe never sends a Lax cookie.
+    State-changing API calls remain protected by the CSRF token.
+    """
+
+    def get_cookie_secure(self, app):
+        return request.is_secure or app.config['SESSION_COOKIE_SECURE']
+
+    def get_cookie_samesite(self, app):
+        configured = app.config['SESSION_COOKIE_SAMESITE']
+        if request.is_secure and app.config['APP_ENV'] != 'production':
+            return 'None'
+        return configured or None
+
+
 def create_app(config=None):
     app = Flask(__name__, static_folder=None)
     app.config.update(
@@ -280,13 +302,21 @@ def create_app(config=None):
         RAZORPAY_KEY_SECRET=os.environ.get('RAZORPAY_KEY_SECRET', ''),
         SHOW_RESET_LINK=os.environ.get('SHOW_RESET_LINK', '1') == '1',
         PUBLIC_BASE_URL=os.environ.get('PUBLIC_BASE_URL', 'http://localhost:3000').rstrip('/'),
-        SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax',
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE=os.environ.get('SESSION_COOKIE_SAMESITE', 'Lax'),
         SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', '0') == '1',
         PERMANENT_SESSION_LIFETIME=timedelta(hours=12), MAX_CONTENT_LENGTH=5 * 1024 * 1024,
         SEED_DEMO=os.environ.get('SEED_DEMO','1') == '1', UPLOAD_DIR=os.environ.get('UPLOAD_DIR', ''),
+        # CSP frame-ancestors source list. Empty = 'self' in production, '*' in development
+        # (so local previews and hosted sandboxes can embed the app in an iframe).
+        FRAME_ANCESTORS=os.environ.get('FRAME_ANCESTORS', '').strip(),
     )
     if config:
         app.config.update(config)
+    app.session_interface = SchemeAwareSessionInterface()
+    if os.environ.get('TRUST_PROXY', '1') == '1':
+        # Honour X-Forwarded-Proto/Host from the TLS-terminating preview proxy.
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
     if app.config['APP_ENV'] == 'production':
         if len(app.config['SECRET_KEY']) < 32 or app.config['SECRET_KEY'] in ('development-only-change-this-secret', 'replace-with-a-long-random-secret-before-deploying'):
             raise RuntimeError('Production requires a long, random SECRET_KEY.')
@@ -341,7 +371,12 @@ def create_app(config=None):
     def secure_headers(resp):
         resp.headers['X-Content-Type-Options'] = 'nosniff'
         resp.headers['Referrer-Policy'] = 'same-origin'
-        resp.headers['X-Frame-Options'] = 'SAMEORIGIN'
+        ancestors = app.config['FRAME_ANCESTORS'] or ("'self'" if app.config['APP_ENV'] == 'production' else '*')
+        if ancestors == "'self'":
+            resp.headers['X-Frame-Options'] = 'SAMEORIGIN'
+        else:
+            # An explicit allow-list replaces X-Frame-Options; browsers honour frame-ancestors.
+            resp.headers['Content-Security-Policy'] = f"frame-ancestors {ancestors}"
         if request.path.startswith('/api/'):
             resp.headers['Cache-Control'] = 'no-store'
         return resp
