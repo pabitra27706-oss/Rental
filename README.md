@@ -41,7 +41,20 @@ npm install
 npm run dev                           # website on http://localhost:3000
 ```
 
-Open <http://localhost:3000>. Vite proxies `/api` and `/uploads` to Flask; browser code never calls localhost directly. The API creates its tables and seeds an empty database on first startup when `SEED_DEMO=1`. SQLite data is stored in `backend/instance/roam.db`.
+Open <http://localhost:3000>. Vite proxies `/api` and `/uploads` to Flask; browser code never calls localhost directly.
+
+### Quick start: single port (live link / one command)
+
+To serve the built website and the API together from one port — the easiest way to get a shareable preview link or to host the demo on a single small server:
+
+```bash
+./run_live.sh                 # installs deps, builds the SPA, seeds demo data, serves on :5000
+# or, manually:
+cd frontend && npm run build && cd ..
+python -m backend.app         # Flask serves frontend/dist at / and the API at /api
+```
+
+Open <http://localhost:5000>. Everything is same-origin, so no proxy or CORS setup is needed. `PORT=8080 ./run_live.sh` changes the port, and `SEED_DEMO=0` (or `APP_ENV=production`) skips sample data. The API creates its tables and seeds an empty database on first startup when `SEED_DEMO=1`. SQLite data is stored in `backend/instance/roam.db`.
 
 ### Demo accounts
 
@@ -157,6 +170,6 @@ All configuration is read from environment variables or the root `.env`; do not 
 python -m backend.create_admin
 ```
 
-For an experimental single-server build, run `npm run build` in `frontend/` and then start Flask; it will serve the built SPA. Use a production WSGI server and HTTPS rather than Flask's development server. `APP_ENV=production` adds sanity checks requiring a long random `SECRET_KEY`, secure cookies, `SHOW_RESET_LINK=0`, `SEED_DEMO=0`, and a non-mock payment mode. Generate a secret with `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+For an experimental single-server build, run `npm run build` in `frontend/` and then start Flask; it will serve the built SPA. Behind a TLS-terminating proxy the app trusts `X-Forwarded-Proto`/`X-Forwarded-Host` (`TRUST_PROXY=0` disables this); over HTTPS it marks the session cookie `Secure` and, outside production, `SameSite=None` so an embedded preview iframe keeps its login. `FRAME_ANCESTORS` sets the CSP `frame-ancestors` allow-list for the served pages: unset it means `*` in development and `'self'` in production. Use a production WSGI server and HTTPS rather than Flask's development server. `APP_ENV=production` adds sanity checks requiring a long random `SECRET_KEY`, secure cookies, `SHOW_RESET_LINK=0`, `SEED_DEMO=0`, and a non-mock payment mode. Generate a secret with `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
 
 Passwords use Werkzeug's scrypt hashing. Session cookies are signed, HttpOnly and SameSite=Lax; random session tokens are stored only as hashes and can be revoked on logout or password reset. State-changing API calls require a CSRF token. User ownership and role checks are enforced on the server, input validation is server-side, SQL uses parameterized ORM queries, and uploaded images are type-checked and re-encoded. The simple login/reset rate limiter is process-local; a production deployment needs a shared rate limiter, HTTPS, hardened infrastructure, backups, monitoring, migrations, tested email, retention policies, and a full security review. The default demo secret, sample users and demo reset links are not safe for production.
