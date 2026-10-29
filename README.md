@@ -74,6 +74,42 @@ To recreate the sample data, **destroying all existing records in the configured
 python -m backend.seed --reset
 ```
 
+## Deploy a shareable public link
+
+The app is deployment-ready as **one service**: Flask serves the built SPA at `/` and the API at `/api`, so a single URL covers the whole product (no CORS, no second host).
+
+### Render (recommended, free tier works)
+
+1. Push this repository to GitHub (the repo must be visible to Render).
+2. In Render: **New + → Blueprint**, select the repository, **Apply**.
+   `render.yaml` provisions the service automatically: Docker build, health check on `/api/health`, a generated `SECRET_KEY`, demo seeding, mock payments, and password-reset links disabled.
+3. Wait for the first build (a few minutes). Render prints a public URL such as `https://roam-rental.onrender.com` — that is your shareable link. Add a custom domain under **Settings → Custom Domains** if you want.
+
+To configure it by hand instead: **New + → Web Service → Docker**, repository, Dockerfile path `./Dockerfile`, health check path `/api/health`, then add the environment variables listed in `render.yaml`.
+
+### Docker anywhere (Railway, Fly.io, VPS, Kubernetes)
+
+```bash
+docker build -t roam .
+docker run -p 8000:8000 \
+  -e SECRET_KEY="$(python -c 'import secrets;print(secrets.token_urlsafe(48))')" \
+  -e SEED_DEMO=1 -e SHOW_RESET_LINK=0 -e PORT=8000 \
+  roam     # http://localhost:8000
+```
+
+Railway/Fly detect the `Dockerfile` automatically. On any host, keep `PORT` as provided by the platform and terminate TLS in front of the container — the app trusts `X-Forwarded-Proto`, so cookies become `Secure` automatically.
+
+### Free-tier and demo caveats
+
+- **Ephemeral disk:** the free plan recreates the container on deploys and restarts, and the SQLite demo database is regenerated and reseeded. Bookings made through the link are lost on redeploy. To persist data, attach a paid Render disk and set `DATABASE_URL=sqlite:////var/data/roam.db` plus `UPLOAD_DIR=/var/data/uploads` (see the commented block in `render.yaml`), or point `DATABASE_URL` at MySQL.
+- **Cold starts:** a free instance sleeps after ~15 minutes idle; the first request takes roughly 30–60 seconds.
+- **It is a public demo:** anyone with the link can sign in as the demo administrator and change or delete records. Share it only as a demo, and see `create_admin.py` if you need a private instance.
+- **Not production-hardened:** payments are simulated, `APP_ENV` stays `development`, and the notes at the end of this file (WSGI server, HTTPS, backups, rate limiting, security review) still apply to a real deployment.
+
+### Why not Vercel
+
+Vercel is built for static sites and short-lived serverless functions. This app is a long-running Flask server with a server-side session store and SQLite on local disk; on Vercel the database would reset on every invocation and logins would not survive. A Vercel-split deployment (static React on Vercel + API on Render/MySQL) is possible but needs cross-origin CORS and third-party cookie configuration that this repo does not implement, so a single Render service is the simpler and more reliable link.
+
 ## MySQL setup
 
 Use MySQL 8.0.16+ with InnoDB and `utf8mb4`. Create a database and a dedicated user (replace the password):
